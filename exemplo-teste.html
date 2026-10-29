@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teste Local Printer Service</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        textarea {
+            height: 200px;
+            font-family: monospace;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖨️ Teste Local Printer Service</h1>
+        
+        <div class="form-group">
+            <label for="url">URL do Serviço:</label>
+            <input type="text" id="url" value="http://localhost:9100" placeholder="http://localhost:9100">
+        </div>
+
+        <div class="form-group">
+            <label for="zpl">Comando ZPL:</label>
+            <textarea id="zpl" placeholder="Cole seu comando ZPL aqui...">^XA
+^FO50,50^ADN,36,20^FDProduto: ABC123^FS
+^FO50,100^ADN,36,20^FDPreço: R$ 29,90^FS
+^FO50,150^ADN,36,20^FDLote: 2024001^FS
+^XZ</textarea>
+        </div>
+
+        <div class="form-group">
+            <button onclick="testarImpressao()">🖨️ Testar Impressão</button>
+            <button onclick="verificarStatus()">📊 Verificar Status</button>
+            <button onclick="listarImpressoras()">🖨️ Listar Impressoras</button>
+            <button onclick="limparLog()">🗑️ Limpar Log</button>
+        </div>
+
+        <div id="status"></div>
+    </div>
+
+    <script>
+        function mostrarStatus(mensagem, tipo = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${tipo}">${mensagem}</div>`;
+        }
+
+        function limparLog() {
+            document.getElementById('status').innerHTML = '';
+        }
+
+        async function testarImpressao() {
+            const url = document.getElementById('url').value;
+            const zpl = document.getElementById('zpl').value;
+
+            if (!zpl.trim()) {
+                mostrarStatus('❌ Por favor, insira um comando ZPL válido.', 'error');
+                return;
+            }
+
+            mostrarStatus('⏳ Enviando ZPL para impressão...', 'info');
+
+            try {
+                const response = await fetch(`${url}/imprimir`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'text/plain'
+                    },
+                    body: zpl
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    mostrarStatus(`✅ ${result.message}`, 'success');
+                } else {
+                    mostrarStatus(`❌ Erro: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                mostrarStatus(`❌ Erro de rede: ${error.message}`, 'error');
+            }
+        }
+
+        async function verificarStatus() {
+            const url = document.getElementById('url').value;
+
+            try {
+                const response = await fetch(`${url}/status`);
+                const result = await response.json();
+
+                if (response.ok) {
+                    const statusHtml = `
+                        <div class="status info">
+                            <strong>📊 Status do Serviço:</strong><br>
+                            Status: ${result.status}<br>
+                            Modo: ${result.modo}<br>
+                            Impressora: ${result.impressora}<br>
+                            Porta: ${result.porta}<br>
+                            Timestamp: ${result.timestamp}
+                        </div>
+                    `;
+                    document.getElementById('status').innerHTML = statusHtml;
+                } else {
+                    mostrarStatus('❌ Erro ao verificar status', 'error');
+                }
+            } catch (error) {
+                mostrarStatus(`❌ Erro de rede: ${error.message}`, 'error');
+            }
+        }
+
+        async function listarImpressoras() {
+            const url = document.getElementById('url').value;
+
+            try {
+                const response = await fetch(`${url}/impressoras`);
+                const result = await response.json();
+
+                if (response.ok) {
+                    let impressorasHtml = '<div class="status info"><strong>🖨️ Impressoras Disponíveis:</strong><br>';
+                    
+                    result.impressoras.forEach(printer => {
+                        impressorasHtml += `• ${printer.nome} (${printer.status})${printer.isDefault ? ' - PADRÃO' : ''}<br>`;
+                    });
+                    
+                    impressorasHtml += `<br><strong>Impressora Configurada:</strong> ${result.impressora_configurada}</div>`;
+                    
+                    document.getElementById('status').innerHTML = impressorasHtml;
+                } else {
+                    mostrarStatus('❌ Erro ao listar impressoras', 'error');
+                }
+            } catch (error) {
+                mostrarStatus(`❌ Erro de rede: ${error.message}`, 'error');
+            }
+        }
+
+        // Verificar status ao carregar a página
+        window.onload = function() {
+            verificarStatus();
+        };
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,42 @@
+{
+  "name": "local-printer-service",
+  "version": "1.0.0",
+  "description": "Serviço local para impressão de etiquetas ZPL no Windows",
+  "main": "index.js",
+  "bin": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "build": "pkg . --targets node22-win-x64 --output dist/local-printer-service.exe",
+    "build:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1",
+    "install:app": "powershell -NoProfile -ExecutionPolicy Bypass -File installer/install.ps1",
+    "test": "echo \"Modo de teste ativado - ZPL será salvo em arquivo\""
+  },
+  "pkg": {
+    "targets": [
+      "node22-win-x64"
+    ],
+    "outputPath": "dist",
+    "assets": []
+  },
+  "keywords": [
+    "printer",
+    "zpl",
+    "windows",
+    "express",
+    "etiquetas"
+  ],
+  "author": "Local Printer Service",
+  "license": "MIT",
+  "dependencies": {
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.22.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
