@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const impressaoPdf = require('./impressao-pdf');
 
 // Pasta gravável: ao lado do .exe (pkg) ou do projeto (dev)
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
@@ -155,6 +156,52 @@ app.post('/imprimir', async (req, res) => {
     }
 });
 
+const rawPdf = bodyParser.raw({
+    type: 'application/pdf',
+    limit: '25mb'
+});
+
+function responderTexto(res, status, texto) {
+    res.status(status);
+    res.set('Content-Type', 'text/plain; charset=utf-8');
+    res.send(texto);
+}
+
+function receberPdf(req, res, next) {
+    rawPdf(req, res, (err) => {
+        if (!err) {
+            next();
+            return;
+        }
+        const status = err.status || err.statusCode || 400;
+        if (status === 413 || err.type === 'entity.too.large') {
+            responderTexto(res, 413, 'PDF excede o tamanho permitido');
+            return;
+        }
+        responderTexto(res, 400, 'PDF ausente ou inválido');
+    });
+}
+
+app.post('/imprimir-pdf', receberPdf, async (req, res) => {
+    try {
+        const impressora = req.query.impressora;
+        if (typeof impressora !== 'string' || impressora.trim() === '') {
+            responderTexto(res, 400, 'Impressora não informada');
+            return;
+        }
+
+        const bytes = Buffer.isBuffer(req.body) ? req.body.length : 0;
+        console.log(`PDF recebido (${bytes} bytes) para impressora: ${impressora}`);
+        await impressaoPdf.imprimirPdf(req.body, impressora);
+        responderTexto(res, 200, `PDF enviado para a impressora ${impressora}`);
+    } catch (error) {
+        console.error('Erro PDF:', error.message);
+        const status = error.status || 500;
+        const texto = error.status ? error.message : `Falha no spooler: ${error.message}`;
+        responderTexto(res, status, texto);
+    }
+});
+
 app.get('/status', (req, res) => {
     res.json({
         status: 'online',
@@ -168,41 +215,11 @@ app.get('/status', (req, res) => {
 
 app.get('/impressoras', async (req, res) => {
     try {
-        const { exec } = require('child_process');
-        const { promisify } = require('util');
-        const execAsync = promisify(exec);
-
-        const command = `powershell -Command "Get-Printer | Select-Object Name, PrinterStatus | ConvertTo-Json"`;
-
-        try {
-            const { stdout } = await execAsync(command);
-            const printers = JSON.parse(stdout);
-
-            res.json({
-                impressoras: Array.isArray(printers) ? printers.map(p => ({
-                    nome: p.Name,
-                    status: p.PrinterStatus,
-                    isDefault: false
-                })) : [{
-                    nome: printers.Name,
-                    status: printers.PrinterStatus,
-                    isDefault: false
-                }],
-                impressora_configurada: NOME_IMPRESSORA
-            });
-        } catch (psError) {
-            res.json({
-                impressoras: [{
-                    nome: NOME_IMPRESSORA,
-                    status: 'unknown',
-                    isDefault: true
-                }],
-                impressora_configurada: NOME_IMPRESSORA,
-                aviso: 'Não foi possível listar impressoras automaticamente. Verifique manualmente no Painel de Controle.'
-            });
-        }
+        const impressoras = await impressaoPdf.listarImpressoras();
+        res.json({ impressoras });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        const status = error.status || 500;
+        res.status(status).json({ error: error.message });
     }
 });
 
@@ -211,8 +228,9 @@ app.use('*', (req, res) => {
         error: 'Endpoint não encontrado',
         endpoints_disponiveis: [
             'POST /imprimir - Enviar ZPL para impressão',
+            'POST /imprimir-pdf - Enviar PDF para uma impressora do Windows',
             'GET /status - Status do serviço',
-            'GET /impressoras - Listar impressoras disponíveis'
+            'GET /impressoras - Listar impressoras instaladas no Windows'
         ]
     });
 });
@@ -230,6 +248,7 @@ app.listen(PORT, () => {
     console.log('='.repeat(60));
     console.log('Endpoints disponíveis:');
     console.log(`  POST http://localhost:${PORT}/imprimir`);
+    console.log(`  POST http://localhost:${PORT}/imprimir-pdf`);
     console.log(`  GET  http://localhost:${PORT}/status`);
     console.log(`  GET  http://localhost:${PORT}/impressoras`);
     console.log('='.repeat(60));
