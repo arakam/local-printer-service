@@ -173,32 +173,41 @@ function receberPdf(req, res, next) {
             next();
             return;
         }
+        const id = impressaoPdf.novoId();
         const status = err.status || err.statusCode || 400;
         if (status === 413 || err.type === 'entity.too.large') {
+            impressaoPdf.registrar(id, 'http 413 PDF excede o tamanho permitido');
             responderTexto(res, 413, 'PDF excede o tamanho permitido');
             return;
         }
+        impressaoPdf.registrar(id, `http 400 PDF ausente ou inválido parser=${err.type || err.message || 'erro'}`);
         responderTexto(res, 400, 'PDF ausente ou inválido');
     });
 }
 
 app.post('/imprimir-pdf', receberPdf, async (req, res) => {
+    const id = impressaoPdf.novoId();
+    const inicio = Date.now();
     try {
         const impressora = req.query.impressora;
+        const bytes = Buffer.isBuffer(req.body) ? req.body.length : 0;
+        console.log(`PDF recebido (${bytes} bytes) para impressora: ${impressora}`);
+        impressaoPdf.registrar(id, `recebido bytes=${bytes} impressora=${JSON.stringify(impressora)} content-type=${req.headers['content-type'] || ''}`);
         if (typeof impressora !== 'string' || impressora.trim() === '') {
             responderTexto(res, 400, 'Impressora não informada');
+            impressaoPdf.registrar(id, `http 400 Impressora não informada duracaoMs=${Date.now() - inicio}`);
             return;
         }
 
-        const bytes = Buffer.isBuffer(req.body) ? req.body.length : 0;
-        console.log(`PDF recebido (${bytes} bytes) para impressora: ${impressora}`);
-        await impressaoPdf.imprimirPdf(req.body, impressora);
+        await impressaoPdf.imprimirPdf(req.body, impressora, id);
         responderTexto(res, 200, `PDF enviado para a impressora ${impressora}`);
+        impressaoPdf.registrar(id, `http 200 PDF enviado para a impressora ${impressora} duracaoMs=${Date.now() - inicio}`);
     } catch (error) {
         console.error('Erro PDF:', error.message);
         const status = error.status || 500;
         const texto = error.status ? error.message : `Falha no spooler: ${error.message}`;
         responderTexto(res, status, texto);
+        impressaoPdf.registrar(id, `http ${status} ${texto} duracaoMs=${Date.now() - inicio}`);
     }
 });
 
@@ -244,6 +253,7 @@ app.listen(PORT, () => {
     console.log(`Modo: ${SIMULACAO ? 'SIMULACAO (arquivo saida_zpl.txt)' : 'NORMAL (impressora real)'}`);
     console.log(`Pasta: ${APP_DIR}`);
     console.log(`Config: ${CONFIG_PATH}`);
+    console.log(`Log PDF: ${impressaoPdf.caminhoLog}`);
     console.log(`URL: http://localhost:${PORT}`);
     console.log('='.repeat(60));
     console.log('Endpoints disponíveis:');

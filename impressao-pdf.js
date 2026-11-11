@@ -13,6 +13,46 @@ const POWERSHELL = path.join(
 );
 
 const TEMPO_LIMITE_MS = 120000;
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+const CAMINHO_LOG = path.join(APP_DIR, 'impressao-pdf.log');
+
+let emAndamento = 0;
+
+function novoId() {
+    return crypto.randomBytes(4).toString('hex');
+}
+
+function registrar(id, mensagem) {
+    const texto = String(mensagem == null ? '' : mensagem).replace(/[\r\n]+/g, ' | ');
+    const linha = `${new Date().toISOString()} [${id || '------'}] ${texto}\n`;
+    try {
+        if (fs.existsSync(CAMINHO_LOG) && fs.statSync(CAMINHO_LOG).size > LOG_MAX_BYTES) {
+            const anterior = `${CAMINHO_LOG}.1`;
+            try {
+                fs.unlinkSync(anterior);
+            } catch (error) {
+                // O arquivo anterior pode estar aberto.
+            }
+            try {
+                fs.renameSync(CAMINHO_LOG, anterior);
+            } catch (error) {
+                // Segue acrescentando no arquivo atual.
+            }
+        }
+        fs.appendFileSync(CAMINHO_LOG, linha, 'utf8');
+    } catch (error) {
+        console.error(`Nao foi possivel gravar ${CAMINHO_LOG}: ${error.message}`);
+    }
+}
+
+function resumirSaida(texto) {
+    const limpo = String(texto || '').replace(/[\r\n]+/g, ' | ').trim();
+    if (limpo.length <= 700) {
+        return limpo;
+    }
+    return `${limpo.slice(0, 700)}...`;
+}
 
 class ErroImpressao extends Error {
     constructor(status, message) {
@@ -76,12 +116,16 @@ function executar(script, env) {
         });
 
         const stderrChunks = [];
+        const stdoutChunks = [];
         let timedOut = false;
         const timer = setTimeout(() => {
             timedOut = true;
             child.kill();
         }, TEMPO_LIMITE_MS);
 
+        child.stdout.on('data', (chunk) => {
+            stdoutChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
         child.stderr.on('data', (chunk) => {
             stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         });
@@ -103,7 +147,8 @@ function executar(script, env) {
             resolve({
                 timedOut,
                 payload,
-                stderr: decodificarSaida(Buffer.concat(stderrChunks)).trim()
+                stderr: decodificarSaida(Buffer.concat(stderrChunks)).trim(),
+                stdout: decodificarSaida(Buffer.concat(stdoutChunks)).trim()
             });
         });
     });
@@ -182,11 +227,16 @@ const SCRIPT_IMPRIMIR = `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-function Write-Result([bool]$Ok, [string]$Code, [string]$Message) {
+function Write-Result([bool]$Ok, [string]$Code, [string]$Message, $Extra) {
     $dict = New-Object 'System.Collections.Generic.Dictionary[string,object]'
     $dict['ok'] = $Ok
     if ($Code) { $dict['code'] = $Code }
     if ($Message) { $dict['message'] = $Message }
+    if ($Extra -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Extra.Keys)) {
+            $dict[[string]$key] = $Extra[$key]
+        }
+    }
     Add-Type -AssemblyName System.Web.Extensions
     $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
     $ser.MaxJsonLength = 16777216
@@ -330,21 +380,14 @@ try {
         exit 2
     }
 
-    $primeira = $global:paginas[0]
-    $doc.DocumentName = 'Etiqueta DANFE'
+    $jobId = [string]$env:JOB_ID
+    if ([string]::IsNullOrEmpty($jobId)) { $jobId = 'sem-id' }
+    $doc.DocumentName = "Etiqueta DANFE $jobId"
     $doc.OriginAtMargins = $false
-    $doc.DefaultPageSettings.Landscape = $false
-    $doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
-    $doc.DefaultPageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize('PDF', $primeira.Largura, $primeira.Altura)
-
-    $doc.add_QueryPageSettings({
-        param($sender, $e)
-        if ($global:indice -lt 0 -or $global:indice -ge $global:paginas.Count) { return }
-        $pagina = $global:paginas[$global:indice]
-        $e.PageSettings.Landscape = $false
-        $e.PageSettings.Margins = New-Object System.Drawing.Printing.Margins(0, 0, 0, 0)
-        $e.PageSettings.PaperSize = New-Object System.Drawing.Printing.PaperSize('PDF', $pagina.Largura, $pagina.Altura)
-    })
+    $papelPadrao = $doc.PrinterSettings.DefaultPageSettings.PaperSize
+    if ($papelPadrao) {
+        $doc.DefaultPageSettings.PaperSize = $papelPadrao
+    }
 
     $doc.add_PrintPage({
         param($sender, $e)
@@ -382,8 +425,79 @@ try {
         $e.HasMorePages = ($global:indice -lt $global:paginas.Count)
     })
 
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     $doc.Print()
-    Write-Result $true '' ''
+    $cronometro.Stop()
+
+    $extra = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+    $extra['paginas'] = [int]$global:paginas.Count
+    $extra['printMs'] = [int]$cronometro.ElapsedMilliseconds
+    $extra['impressoraEfetiva'] = [string]$doc.PrinterSettings.PrinterName
+    $extra['documento'] = [string]$doc.DocumentName
+    if ($papelPadrao) {
+        $extra['papel'] = "$($papelPadrao.PaperName) $($papelPadrao.Width)x$($papelPadrao.Height)"
+    }
+    try {
+        $info = Get-Printer -Name $nome -ErrorAction Stop
+        $extra['driver'] = [string]$info.DriverName
+        $extra['porta'] = [string]$info.PortName
+        $extra['statusImpressora'] = [string]$info.PrinterStatus
+    } catch {
+        $extra['filaErro'] = $_.Exception.Message
+    }
+
+    $visto = $false
+    $ultimoStatus = ''
+    $ultimasImpressas = 0
+    $trabalhos = New-Object System.Collections.Generic.List[object]
+    $prazo = (Get-Date).AddSeconds(10)
+    do {
+        $trabalhos = New-Object System.Collections.Generic.List[object]
+        try {
+            $fila = @(Get-PrintJob -PrinterName $nome -ErrorAction Stop)
+            $extra['fila'] = [int]$fila.Count
+            foreach ($job in $fila) {
+                $nomeDoc = [string]$job.DocumentName
+                if ($nomeDoc -eq $doc.DocumentName -or $nomeDoc.Contains($jobId)) {
+                    $item = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+                    $item['id'] = [int]$job.Id
+                    $item['status'] = [string]$job.JobStatus
+                    $item['total'] = [int]$job.TotalPages
+                    $item['impressas'] = [int]$job.PagesPrinted
+                    $item['documento'] = $nomeDoc
+                    [void]$trabalhos.Add($item)
+                    $visto = $true
+                    $ultimoStatus = [string]$job.JobStatus
+                    $ultimasImpressas = [int]$job.PagesPrinted
+                }
+            }
+        } catch {
+            $extra['filaErro'] = $_.Exception.Message
+        }
+        $partesStatus = @($ultimoStatus -split '[,\s]+' | Where-Object { $_ })
+        $concluiu = $false
+        if ($visto -and $trabalhos.Count -eq 0) { $concluiu = $true }
+        if ($ultimasImpressas -gt 0) { $concluiu = $true }
+        if (($partesStatus -contains 'Printed' -or $partesStatus -contains 'Complete') -and -not ($partesStatus -contains 'Printing')) { $concluiu = $true }
+        if ($partesStatus -contains 'Error' -or $partesStatus -contains 'Offline' -or $partesStatus -contains 'Paperout' -or $partesStatus -contains 'Blocked' -or $partesStatus -contains 'Paused') { $concluiu = $true }
+        if ($concluiu) { break }
+        if ((Get-Date) -ge $prazo) { break }
+        Start-Sleep -Milliseconds 500
+    } while ($true)
+
+    $extra['trabalhos'] = $trabalhos.ToArray()
+    $extra['ultimoStatus'] = $ultimoStatus
+    $extra['impressas'] = $ultimasImpressas
+    $partesFinais = @($ultimoStatus -split '[,\s]+' | Where-Object { $_ })
+    if ($partesFinais -contains 'Error' -or $partesFinais -contains 'Offline' -or $partesFinais -contains 'Paperout' -or $partesFinais -contains 'Blocked' -or $partesFinais -contains 'Paused') {
+        Write-Result $false 'spooler' "Trabalho parado na fila: $ultimoStatus" $extra
+        exit 1
+    }
+    if ($trabalhos.Count -gt 0 -and $ultimasImpressas -eq 0 -and ($partesFinais -contains 'Printing')) {
+        Write-Result $false 'spooler' "Trabalho ficou em $ultimoStatus com 0 paginas impressas" $extra
+        exit 1
+    }
+    Write-Result $true '' '' $extra
     exit 0
 } catch {
     Write-Result $false 'spooler' (Mensagem-Erro $_)
@@ -414,25 +528,73 @@ async function listarImpressoras() {
     return lista.map((nome) => String(nome));
 }
 
-async function imprimirPdf(buffer, impressora) {
-    if (!ehPdf(buffer)) {
-        throw new ErroImpressao(400, 'PDF ausente ou inválido');
+function descreverResultado(resultado) {
+    const payload = resultado && resultado.payload;
+    if (!payload) {
+        return `sem resultado do Windows stdout="${resumirSaida(resultado && resultado.stdout)}" stderr="${resumirSaida(resultado && resultado.stderr)}"`;
     }
-    if (typeof impressora !== 'string' || impressora.trim() === '') {
-        throw new ErroImpressao(400, 'Impressora não informada');
-    }
+    const trabalhos = Array.isArray(payload.trabalhos) ? payload.trabalhos : [];
+    const fila = trabalhos.map((job) => {
+        return `#${job.id} status=${job.status} paginas=${job.total} impressas=${job.impressas} doc="${job.documento}"`;
+    }).join('; ');
+    return [
+        `ok=${payload.ok === true}`,
+        payload.code ? `code=${payload.code}` : '',
+        payload.message ? `mensagem="${payload.message}"` : '',
+        payload.paginas != null ? `paginas=${payload.paginas}` : '',
+        payload.printMs != null ? `printMs=${payload.printMs}` : '',
+        payload.impressoraEfetiva ? `impressoraEfetiva="${payload.impressoraEfetiva}"` : '',
+        payload.driver ? `driver="${payload.driver}"` : '',
+        payload.porta ? `porta="${payload.porta}"` : '',
+        payload.papel ? `papel="${payload.papel}"` : '',
+        payload.ultimoStatus ? `ultimoStatus="${payload.ultimoStatus}"` : '',
+        payload.documento ? `documento="${payload.documento}"` : '',
+        payload.fila != null ? `fila=${payload.fila}` : '',
+        payload.filaErro ? `filaErro="${payload.filaErro}"` : '',
+        trabalhos.length ? `trabalhos=${fila}` : 'trabalhos=nenhum com este id',
+        resultado.timedOut ? 'timeout=sim' : ''
+    ].filter(Boolean).join(' ');
+}
 
-    const instaladas = await listarImpressoras();
-    if (!instaladas.includes(impressora)) {
-        throw new ErroImpressao(404, 'Impressora não instalada');
-    }
-
-    const arquivo = salvarPdf(buffer);
+async function imprimirPdf(buffer, impressora, id) {
+    const registro = id || novoId();
+    emAndamento += 1;
+    const simultaneos = emAndamento;
+    let arquivo = null;
+    let enviou = false;
     try {
+        registrar(registro, `processando emAndamento=${simultaneos} bytes=${Buffer.isBuffer(buffer) ? buffer.length : 0} impressora=${JSON.stringify(impressora)}`);
+        if (simultaneos > 1) {
+            registrar(registro, 'sobreposicao: outro PDF ainda esta sendo enviado ao spooler');
+        }
+        if (!ehPdf(buffer)) {
+            throw new ErroImpressao(400, 'PDF ausente ou inválido');
+        }
+        if (typeof impressora !== 'string' || impressora.trim() === '') {
+            throw new ErroImpressao(400, 'Impressora não informada');
+        }
+
+        const instaladas = await listarImpressoras();
+        registrar(registro, `impressoras instaladas (${instaladas.length}): ${instaladas.map((nome) => JSON.stringify(nome)).join(', ') || 'nenhuma'}`);
+        if (!instaladas.includes(impressora)) {
+            throw new ErroImpressao(404, 'Impressora não instalada');
+        }
+
+        arquivo = salvarPdf(buffer);
+        registrar(registro, `pdf gravado bytes=${buffer.length} arquivo=${arquivo}`);
+        const inicioSpooler = Date.now();
         const resultado = await executar(SCRIPT_IMPRIMIR, {
             PDF_PATH: arquivo,
-            PRINTER_NAME: impressora
+            PRINTER_NAME: impressora,
+            JOB_ID: registro
         });
+        registrar(registro, `spooler duracaoMs=${Date.now() - inicioSpooler} ${descreverResultado(resultado)}`);
+        if (resultado.stdout) {
+            registrar(registro, `stdout ${resumirSaida(resultado.stdout)}`);
+        }
+        if (resultado.stderr) {
+            registrar(registro, `stderr ${resumirSaida(resultado.stderr)}`);
+        }
         if (resultado.timedOut) {
             throw new ErroImpressao(500, 'Falha no spooler: tempo esgotado');
         }
@@ -440,11 +602,28 @@ async function imprimirPdf(buffer, impressora) {
         if (erro) {
             throw erro;
         }
+        enviou = true;
+        const trabalhos = resultado.payload && Array.isArray(resultado.payload.trabalhos)
+            ? resultado.payload.trabalhos
+            : [];
+        if (trabalhos.length === 0) {
+            registrar(registro, 'aviso: o Print() retornou sem erro, mas a fila nao mostrou este documento. O HTTP 200 nao garante papel');
+        } else {
+            const comErro = trabalhos.filter((job) => /error|offline|blocked|paused|deleting/i.test(String(job.status || '')));
+            if (comErro.length) {
+                registrar(registro, `aviso: trabalho entrou na fila com status de problema: ${comErro.map((job) => job.status).join(', ')}`);
+            }
+        }
     } finally {
-        try {
-            fs.unlinkSync(arquivo);
-        } catch (error) {
-            // O spooler já recebeu as páginas renderizadas.
+        emAndamento = Math.max(0, emAndamento - 1);
+        if (arquivo && enviou) {
+            try {
+                fs.unlinkSync(arquivo);
+            } catch (error) {
+                registrar(registro, `aviso: nao foi possivel apagar o pdf temporario ${arquivo}`);
+            }
+        } else if (arquivo) {
+            registrar(registro, `pdf temporario mantido para conferencia: ${arquivo}`);
         }
     }
 }
@@ -454,6 +633,9 @@ module.exports = {
     salvarPdf,
     listarImpressoras,
     imprimirPdf,
+    novoId,
+    registrar,
+    caminhoLog: CAMINHO_LOG,
     scripts: {
         listar: SCRIPT_LISTAR,
         imprimir: SCRIPT_IMPRIMIR
